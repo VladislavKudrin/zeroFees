@@ -5,7 +5,7 @@ import requests
 import os
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(override=True)
 
 BLOCKFROST_PROJECT_ID = os.getenv("BLOCKFROST_PROJECT_ID")
 FEE = int(os.getenv("FEE"))
@@ -16,7 +16,7 @@ TOKEN_NAME = os.getenv("TOKEN_NAME")
 MNEMONIC_SEND = os.getenv("MNEMONIC_SEND")
 MNEMONIC_FEE_PAYER = os.getenv("MNEMONIC_FEE_PAYER")
 TO_ADDRESS = os.getenv("TO_ADDRESS")
-
+FROM_ADDRESS = os.getenv("FROM_ADDRESS")
 
 def get_address_utxos(address):
   headers = {
@@ -61,14 +61,23 @@ def calculate_tx_fee(inputs, outputs):
 network = Network.TESTNET
 context = BlockFrostChainContext(BLOCKFROST_PROJECT_ID, base_url=ApiUrls.preprod.value)
 
-hdw = HDWallet.from_mnemonic(MNEMONIC_SEND)
-hdw_fee = HDWallet.from_mnemonic(MNEMONIC_FEE_PAYER)
+#IF ADDRESS IS NOT DEFINED THEN TAKE MNEMONIC AND DERIVE THE ADDRESS
+if len(FROM_ADDRESS) == 0 and len(MNEMONIC_SEND) > 0:
+  hdw = HDWallet.from_mnemonic(MNEMONIC_SEND)
+  hdwallet_spend = hdw.derive_from_path("m/1852'/1815'/0'/0/0")
+  spend_public_key = hdwallet_spend.public_key
+  spend_private_key = hdwallet_spend.xprivate_key
+  hdwallet_stake = hdw.derive_from_path("m/1852'/1815'/0'/2/0")
+  stake_public_key = hdwallet_stake.public_key
+  spend_vk = PaymentExtendedVerificationKey.from_primitive(spend_public_key)
+  stake_vk = PaymentVerificationKey.from_primitive(stake_public_key)
+  spend_sk = PaymentExtendedSigningKey.from_primitive(spend_private_key)
+  send_address = Address(spend_vk.hash(), stake_vk.hash(), network=Network.TESTNET)
+else:
+  send_address = Address.decode(FROM_ADDRESS)
 
-hdwallet_spend = hdw.derive_from_path("m/1852'/1815'/0'/0/0")
-spend_public_key = hdwallet_spend.public_key
-spend_private_key = hdwallet_spend.xprivate_key
-hdwallet_stake = hdw.derive_from_path("m/1852'/1815'/0'/2/0")
-stake_public_key = hdwallet_stake.public_key
+#DEFINE HDWALLET FOR FEE PAYER
+hdw_fee = HDWallet.from_mnemonic(MNEMONIC_FEE_PAYER)
 
 hdwallet_fee = hdw_fee.derive_from_path("m/1852'/1815'/0'/0/0")
 spend_public_key_fee = hdwallet_fee.public_key
@@ -78,16 +87,11 @@ stake_public_key_fee = hdwallet_stake_fee.public_key
 
 
 # DEFINE KEYS
-spend_vk = PaymentExtendedVerificationKey.from_primitive(spend_public_key)
-stake_vk = PaymentVerificationKey.from_primitive(stake_public_key)
-spend_sk = PaymentExtendedSigningKey.from_primitive(spend_private_key)
-
 spend_vk_fee = PaymentExtendedVerificationKey.from_primitive(spend_public_key_fee)
 stake_vk_fee = PaymentVerificationKey.from_primitive(stake_public_key_fee)
 spend_sk_fee = PaymentExtendedSigningKey.from_primitive(spend_private_key_fee)
 
 #DEFINE ADDRESSES
-send_address = Address(spend_vk.hash(), stake_vk.hash(), network=Network.TESTNET)
 fee_address = Address(spend_vk_fee.hash(), stake_vk_fee.hash(), network=Network.TESTNET)
 to_address = Address.decode(TO_ADDRESS)
 
@@ -115,8 +119,6 @@ send_address_output_tokens = TransactionOutput(to_address, Value.from_primitive(
             }
         },
     ]))
-
-formatted_json = json.dumps(valid_sender_utxo, indent=4)
 
 send_address_change = TransactionOutput(send_address, Value.from_primitive([
         sum(int(amount["quantity"]) for amount in valid_sender_utxo["amount"] if amount["unit"] == "lovelace"),
@@ -167,8 +169,12 @@ fee_address_signature = spend_sk_fee.sign(tx_body.hash())
 
 vk_witnesses = [VerificationKeyWitness(spend_vk_fee, fee_address_signature)]
 
-signed_tx = Transaction(tx_body, TransactionWitnessSet(vkey_witnesses=vk_witnesses))
+#IF MNEMONIC SEND IS DEFINED THEN SIGN WITH IT
+if len(FROM_ADDRESS) == 0 and len(MNEMONIC_SEND) > 0:
+  send_address_signature = spend_sk.sign(tx_body.hash())
+  vk_witnesses.append(VerificationKeyWitness(spend_vk, send_address_signature))
 
+signed_tx = Transaction(tx_body, TransactionWitnessSet(vkey_witnesses=vk_witnesses))
 
 # #CBOR FOR ETERNL
 print(signed_tx.to_cbor().hex())
